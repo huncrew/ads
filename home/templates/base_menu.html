@@ -1,0 +1,42 @@
+{% extends 'base_bootstrap.html' %}
+{% load app_tags %} <!-- see home/templatetags/app_tags.py and dj4e-samples/settings.py -->
+{% block navbar %}
+<nav class="navbar navbar-expand-sm navbar-dark bg-dark">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{% url 'boxing_poll:index' %}">Boxcon</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mynavbar">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="mynavbar">
+      <ul class="navbar-nav me-auto">
+        <li class="nav-item">
+         <a class="nav-link" href="{% url 'boxing_poll:future_fights' %}">Vote For A Fight</a>
+       </li>
+       <li class="nav-item">
+         <a class="nav-link" href="{% url 'boxing_poll:favourites' %}">Favourites</a>
+       </li>
+       <li class="nav-item">
+         <a class="nav-link" href="javascript:void(0)">Link</a>
+       </li>
+      </ul>
+      <ul class="nav navbar-nav navbar-right">
+        {% if user.is_authenticated %}
+        <div class="dropdown">
+            <button class="btn btn-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+                <img style="width: 25px;" src="//www.gravatar.com/avatar/d41d8cd98f00b204e9800998ecf8427e?s=60&amp;d=identicon&amp;r=PG"/><b class="caret"></b></a>
+            </button>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item" href="/accounts/logout/?next=/boxing_poll/">Logout</a></li>
+            </ul>
+        </div>
+         {% else %}
+        <a href="{% url 'login' %}?next={% url 'boxing_poll:index' %}">
+        <button type="button" class="btn btn-dark">Login</button>
+        </a>
+         <li></li>
+         {% endif %}
+      </ul>
+    </div>
+  </div>
+</nav>
+{% endblock %}
