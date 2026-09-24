@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  GPU instance running ComfyUI with the open-weight Wan 2.2 video models
+  (Apache 2.0). ComfyUI listens on localhost only; reach it via an SSM or SSH
+  tunnel (see gpu-video/README.md).
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: g6e.2xlarge
+    AllowedValues:
+      - g6e.xlarge    # 1x L40S 48GB, 32GB RAM  (~$1.86/hr us-east-1)
+      - g6e.2xlarge   # 1x L40S 48GB, 64GB RAM  (~$2.24/hr) - recommended
+      - g6e.4xlarge   # 1x L40S 48GB, 128GB RAM (~$3.00/hr)
+      - g5.2xlarge    # 1x A10G 24GB, 32GB RAM  (~$1.21/hr) - 5B model only is comfortable
+      - p5.4xlarge    # 1x H100 80GB            - fastest, needs P quota
+    Description: GPU instance type. L40S (g6e) is the sweet spot for Wan 2.2 14B.
+  ModelSet:
+    Type: String
+    Default: wan22-all
+    AllowedValues: [wan22-all, wan22-14b, wan22-5b]
+    Description: >
+      wan22-all = 14B text-to-video + image-to-video + 5B + 4-step speed LoRAs (~85GB).
+      wan22-5b = small 5B text/image-to-video only (~20GB), fine on 24GB GPUs.
+  AdultModels:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Also download Wan 2.2 Remix NSFW (community fine-tune, 14B T2V + I2V, 4-step
+      lightning baked in) and its matching NSFW UMT5 text encoder (~64GB extra).
+  VolumeSizeGiB:
+    Type: Number
+    Default: 250
+    MinValue: 100
+    Description: Root disk (models + outputs). Persists across stop/start.
+  Spot:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Use a persistent spot instance (~60-70% cheaper, needs spot G quota). If AWS
+      reclaims capacity it stops (disk kept); start it again with ./gpu.sh start.
+  IdleStopMinutes:
+    Type: Number
+    Default: 60
+    MinValue: 0
+    Description: Stop the instance after this many minutes with no GPU work (0 = never). Saves money.
+  KeyName:
+    Type: String
+    Default: ""
+    Description: Optional EC2 key pair name for SSH. Leave empty to use SSM Session Manager only.
+  SshCidr:
+    Type: String
+    Default: ""
+    Description: Optional CIDR allowed to SSH (e.g. 203.0.113.4/32). Leave empty to open no inbound ports.
+  AmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id
+    Description: AWS Deep Learning Base AMI (Ubuntu 24.04, NVIDIA driver preinstalled).
+
+Conditions:
+  HasKey: !Not [!Equals [!Ref KeyName, ""]]
+  HasSsh: !Not [!Equals [!Ref SshCidr, ""]]
+  UseSpot: !Equals [!Ref Spot, "true"]
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref Role]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ComfyUI GPU box - no public ComfyUI port; optional SSH only
+      SecurityGroupIngress: !If
+        - HasSsh
+        - - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref SshCidr
+        - !Ref AWS::NoValue
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+        InstanceMarketOptions: !If
+          - UseSpot
+          - MarketType: spot
+            SpotOptions:
+              SpotInstanceType: persistent
+              InstanceInterruptionBehavior: stop
+          - !Ref AWS::NoValue
+
+  Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKey, !Ref KeyName, !Ref AWS::NoValue]
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      InstanceInitiatedShutdownBehavior: stop
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: !Ref VolumeSizeGiB
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-comfyui" }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Bootstrap log: /var/log/comfyui-bootstrap.log
+          exec > >(tee -a /var/log/comfyui-bootstrap.log) 2>&1
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          MODEL_SET="${ModelSet}"
+          ADULT_MODELS="${AdultModels}"
+          IDLE_STOP_MINUTES="${IdleStopMinutes}"
+          U=ubuntu
+          HOME_DIR=/home/$U
+          C=$HOME_DIR/ComfyUI
+
+          apt-get -o DPkg::Lock::Timeout=900 update
+          apt-get -o DPkg::Lock::Timeout=900 install -y git ffmpeg python3-venv python3-dev build-essential aria2 jq
+
+          # --- ComfyUI + useful custom nodes ---
+          sudo -u $U git clone https://github.com/comfyanonymous/ComfyUI.git $C
+          sudo -u $U git clone https://github.com/ltdrdata/ComfyUI-Manager.git $C/custom_nodes/ComfyUI-Manager
+          sudo -u $U git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git $C/custom_nodes/ComfyUI-VideoHelperSuite
+          sudo -u $U python3 -m venv $C/venv
+          sudo -u $U $C/venv/bin/pip install --upgrade pip
+          sudo -u $U $C/venv/bin/pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+          sudo -u $U $C/venv/bin/pip install -r $C/requirements.txt
+          sudo -u $U $C/venv/bin/pip install -r $C/custom_nodes/ComfyUI-Manager/requirements.txt
+          sudo -u $U $C/venv/bin/pip install -r $C/custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt
+
+          cat > /etc/systemd/system/comfyui.service <<EOF
+          [Unit]
+          Description=ComfyUI
+          After=network-online.target
+          [Service]
+          User=$U
+          WorkingDirectory=$C
+          ExecStart=$C/venv/bin/python main.py --listen 127.0.0.1 --port 8188
+          Restart=always
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+          systemctl daemon-reload
+          systemctl enable --now comfyui
+
+          # --- Models (Comfy-Org repackaged Wan 2.2, Apache 2.0) ---
+          HF=https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files
+          LIST=/tmp/models.txt
+          : > $LIST
+          # out= is required: HF redirects to a CDN URL whose basename is a content hash.
+          add() { printf '%s\n  dir=%s\n  out=%s\n' "$HF/$1" "$C/models/$2" "${!1##*/}" >> $LIST; }
+          add text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors text_encoders
+          if [ "$MODEL_SET" != wan22-5b ]; then
+            add vae/wan_2.1_vae.safetensors vae
+            for m in t2v_high_noise t2v_low_noise i2v_high_noise i2v_low_noise; do
+              add diffusion_models/wan2.2_${!m}_14B_fp8_scaled.safetensors diffusion_models
+            done
+            add loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors loras
+            add loras/wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors loras
+            add loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors loras
+            add loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors loras
+          fi
+          if [ "$MODEL_SET" != wan22-14b ]; then
+            add vae/wan2.2_vae.safetensors vae
+            add diffusion_models/wan2.2_ti2v_5B_fp16.safetensors diffusion_models
+          fi
+          if [ "$ADULT_MODELS" = true ]; then
+            [ "$MODEL_SET" = wan22-5b ] && add vae/wan_2.1_vae.safetensors vae
+            R=https://huggingface.co/FX-FeiHou/wan2.2-Remix/resolve/main/NSFW
+            for f in i2v_14b_high_lighting_fp8_e4m3fn_v3.0 i2v_14b_low_lighting_fp8_e4m3fn_v3.0 \
+                     t2v_14b_high_lighting_v2.0 t2v_14b_low_lighting_v2.0; do
+              printf '%s\n  dir=%s\n  out=%s\n' "$R/Wan2.2_Remix_NSFW_$f.safetensors" "$C/models/diffusion_models" "Wan2.2_Remix_NSFW_$f.safetensors" >> $LIST
+            done
+            printf '%s\n  dir=%s\n  out=%s\n' \
+              https://huggingface.co/NSFW-API/NSFW-Wan-UMT5-XXL/resolve/main/nsfw_wan_umt5-xxl_fp8_scaled.safetensors \
+              "$C/models/text_encoders" nsfw_wan_umt5-xxl_fp8_scaled.safetensors >> $LIST
+          fi
+          sudo -u $U aria2c -i $LIST -j 4 -x 8 -s 8 --auto-file-renaming=false --continue=true \
+            --max-tries=10 --retry-wait=10 --console-log-level=warn --summary-interval=60
+
+          # --- Auto-stop when idle (GPU unused + empty queue) ---
+          if [ "$IDLE_STOP_MINUTES" -gt 0 ]; then
+            cat > /usr/local/bin/comfyui-idle-stop <<EOF
+          #!/bin/bash
+          STAMP=/var/run/comfyui-last-active
+          [ -f \$STAMP ] || touch \$STAMP
+          UTIL=\$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits | sort -n | tail -1)
+          Q=\$(curl -s http://127.0.0.1:8188/queue | jq '(.queue_running|length)+(.queue_pending|length)' 2>/dev/null || echo 0)
+          if [ "\${!UTIL:-0}" -gt 5 ] || [ "\${!Q:-0}" -gt 0 ]; then touch \$STAMP; fi
+          IDLE=\$(( (\$(date +%s) - \$(stat -c %Y \$STAMP)) / 60 ))
+          if [ \$IDLE -ge $IDLE_STOP_MINUTES ]; then logger "comfyui idle \$IDLE min, stopping"; shutdown -h now; fi
+          EOF
+            chmod +x /usr/local/bin/comfyui-idle-stop
+            cat > /etc/systemd/system/comfyui-idle-stop.service <<EOF
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/comfyui-idle-stop
+          EOF
+            cat > /etc/systemd/system/comfyui-idle-stop.timer <<EOF
+          [Timer]
+          OnBootSec=10min
+          OnUnitActiveSec=5min
+          [Install]
+          WantedBy=timers.target
+          EOF
+            systemctl daemon-reload
+            systemctl enable --now comfyui-idle-stop.timer
+          fi
+
+          touch $HOME_DIR/BOOTSTRAP_DONE
+          echo "ComfyUI bootstrap complete"
+
+Outputs:
+  InstanceId:
+    Value: !Ref Instance
+  PublicIp:
+    Value: !GetAtt Instance.PublicIp
+  TunnelCommand:
+    Description: Run locally, then open http://localhost:8188
+    Value: !Sub "aws ssm start-session --region ${AWS::Region} --target ${Instance} --document-name AWS-StartPortForwardingSession --parameters portNumber=8188,localPortNumber=8188"
