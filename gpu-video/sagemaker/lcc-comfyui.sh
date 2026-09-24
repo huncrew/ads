@@ -24,7 +24,7 @@ if [ ! -f $C/.installed ]; then
   touch $C/.installed
 fi
 
-pkill -f "ComfyUI/main.py" || true
+# Each app start is a fresh container, so no old ComfyUI process to stop.
 cd $C && nohup $C/venv/bin/python $C/main.py --listen 127.0.0.1 --port 8188 > $HOME/comfyui.log 2>&1 &
 
 # Models: download anything missing (resumable), 4 at a time.
