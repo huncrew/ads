@@ -34,6 +34,13 @@ Parameters:
     Default: 250
     MinValue: 100
     Description: Root disk (models + outputs). Persists across stop/start.
+  Spot:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Use a persistent spot instance (~60-70% cheaper, needs spot G quota). If AWS
+      reclaims capacity it stops (disk kept); start it again with ./gpu.sh start.
   IdleStopMinutes:
     Type: Number
     Default: 60
@@ -55,6 +62,7 @@ Parameters:
 Conditions:
   HasKey: !Not [!Equals [!Ref KeyName, ""]]
   HasSsh: !Not [!Equals [!Ref SshCidr, ""]]
+  UseSpot: !Equals [!Ref Spot, "true"]
 
 Resources:
   Role:
@@ -86,17 +94,32 @@ Resources:
             CidrIp: !Ref SshCidr
         - !Ref AWS::NoValue
 
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        MetadataOptions:
+          HttpTokens: required
+        InstanceMarketOptions: !If
+          - UseSpot
+          - MarketType: spot
+            SpotOptions:
+              SpotInstanceType: persistent
+              InstanceInterruptionBehavior: stop
+          - !Ref AWS::NoValue
+
   Instance:
     Type: AWS::EC2::Instance
     Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
       ImageId: !Ref AmiId
       InstanceType: !Ref InstanceType
       KeyName: !If [HasKey, !Ref KeyName, !Ref AWS::NoValue]
       IamInstanceProfile: !Ref InstanceProfile
       SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
       InstanceInitiatedShutdownBehavior: stop
-      MetadataOptions:
-        HttpTokens: required
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:

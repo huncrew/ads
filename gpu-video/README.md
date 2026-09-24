@@ -51,6 +51,7 @@ Pass CloudFormation overrides to `deploy`:
 | `InstanceType` | `g6e.2xlarge` | `g6e.xlarge`, `g6e.4xlarge`, `g5.2xlarge`, `p5.4xlarge` (H100, needs *P instances* quota) |
 | `ModelSet` | `wan22-all` | `wan22-14b`, `wan22-5b` |
 | `AdultModels` | `false` | `true` adds Wan 2.2 Remix NSFW (T2V + I2V) and its NSFW text encoder (~64GB) |
+| `Spot` | `false` | `true` uses a spot instance, about 60–70% cheaper. It needs the *All G and VT Spot Instance Requests* quota. If AWS reclaims the capacity, the instance stops but the disk is kept, and `./gpu.sh start` resumes it when capacity returns. |
 | `VolumeSizeGiB` | `250` | |
 | `IdleStopMinutes` | `60` | `0` disables auto-stop |
 | `KeyName` / `SshCidr` | empty | Optional SSH access |
