@@ -10,20 +10,24 @@ SPACE=$NAME-space
 INSTANCE=${INSTANCE:-ml.g6e.2xlarge}
 DISK_GB=${DISK_GB:-250}
 IDLE_MIN=${IDLE_MIN:-120}
+# AWS-owned SageMaker Distribution (GPU) image; account IDs per region:
+# https://docs.aws.amazon.com/sagemaker/latest/dg/notebooks-available-images.html
+declare -A IMG_ACCT=([us-west-2]=542918446943 [us-east-1]=885854791233 [us-east-2]=137914896644)
+IMAGE_ARN=${IMAGE_ARN:-arn:aws:sagemaker:$REGION:${IMG_ACCT[$REGION]:-}:image/sagemaker-distribution-gpu}
 DIR=$(cd "$(dirname "$0")" && pwd)
 aws() { command aws --region "$REGION" "$@"; }
 
 domain_id() { aws sagemaker list-domains --query "Domains[?DomainName=='$NAME'].DomainId | [0]" --output text; }
 wait_app() { # wait until the JupyterLab app reaches $1
   while s=$(aws sagemaker describe-app --domain-id "$D" --space-name "$SPACE" --app-type JupyterLab --app-name default --query Status --output text 2>/dev/null) && [ "$s" != "$1" ]; do
-    [ "$s" = Failed ] && { aws sagemaker describe-app --domain-id "$D" --space-name "$SPACE" --app-type JupyterLab --app-name default --query FailureReason --output text; exit 1; }
+    [ "$s" = Failed ] && [ "$1" != Deleted ] && { aws sagemaker describe-app --domain-id "$D" --space-name "$SPACE" --app-type JupyterLab --app-name default --query FailureReason --output text; exit 1; }
     [ "$1" = Deleted ] && [ "$s" = Deleted ] && break
     echo "  app: $s"; sleep 20
   done
 }
 start_app() {
   aws sagemaker create-app --domain-id "$D" --space-name "$SPACE" --app-type JupyterLab --app-name default \
-    --resource-spec "InstanceType=$INSTANCE,LifecycleConfigArn=$LCC_ARN" >/dev/null
+    --resource-spec "InstanceType=$INSTANCE,SageMakerImageArn=$IMAGE_ARN,LifecycleConfigArn=$LCC_ARN" >/dev/null
   wait_app InService
 }
 
@@ -34,7 +38,10 @@ case "${1:-create}" in
   start)
     D=$(domain_id)
     LCC_ARN=$(aws sagemaker describe-studio-lifecycle-config --studio-lifecycle-config-name "$NAME-lcc" --query StudioLifecycleConfigArn --output text)
-    wait_app Deleted; start_app; echo "Running."; exit ;;
+    S=$(aws sagemaker describe-app --domain-id "$D" --space-name "$SPACE" --app-type JupyterLab --app-name default --query Status --output text 2>/dev/null || echo Deleted)
+    # Failed apps are auto-deleted by SageMaker; only wait if one is still shutting down.
+    case "$S" in Deleted|Failed) ;; *) wait_app Deleted ;; esac
+    start_app; echo "Running."; exit ;;
 esac
 
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
