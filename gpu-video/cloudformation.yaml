@@ -102,6 +102,7 @@ Resources:
           Ebs:
             VolumeSize: !Ref VolumeSizeGiB
             VolumeType: gp3
+            Encrypted: true
             DeleteOnTermination: true
       Tags:
         - { Key: Name, Value: !Sub "${AWS::StackName}-comfyui" }
