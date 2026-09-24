@@ -22,6 +22,13 @@ Parameters:
     Description: >
       wan22-all = 14B text-to-video + image-to-video + 5B + 4-step speed LoRAs (~85GB).
       wan22-5b = small 5B text/image-to-video only (~20GB), fine on 24GB GPUs.
+  AdultModels:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Also download Wan 2.2 Remix NSFW (community fine-tune, 14B T2V + I2V, 4-step
+      lightning baked in) and its matching NSFW UMT5 text encoder (~64GB extra).
   VolumeSizeGiB:
     Type: Number
     Default: 250
@@ -106,6 +113,7 @@ Resources:
           set -euxo pipefail
           export DEBIAN_FRONTEND=noninteractive
           MODEL_SET="${ModelSet}"
+          ADULT_MODELS="${AdultModels}"
           IDLE_STOP_MINUTES="${IdleStopMinutes}"
           U=ubuntu
           HOME_DIR=/home/$U
@@ -159,6 +167,17 @@ Resources:
           if [ "$MODEL_SET" != wan22-14b ]; then
             add vae/wan2.2_vae.safetensors vae
             add diffusion_models/wan2.2_ti2v_5B_fp16.safetensors diffusion_models
+          fi
+          if [ "$ADULT_MODELS" = true ]; then
+            [ "$MODEL_SET" = wan22-5b ] && add vae/wan_2.1_vae.safetensors vae
+            R=https://huggingface.co/FX-FeiHou/wan2.2-Remix/resolve/main/NSFW
+            for f in i2v_14b_high_lighting_fp8_e4m3fn_v3.0 i2v_14b_low_lighting_fp8_e4m3fn_v3.0 \
+                     t2v_14b_high_lighting_v2.0 t2v_14b_low_lighting_v2.0; do
+              printf '%s\n  dir=%s\n' "$R/Wan2.2_Remix_NSFW_$f.safetensors" "$C/models/diffusion_models" >> $LIST
+            done
+            printf '%s\n  dir=%s\n' \
+              https://huggingface.co/NSFW-API/NSFW-Wan-UMT5-XXL/resolve/main/nsfw_wan_umt5-xxl_fp8_scaled.safetensors \
+              "$C/models/text_encoders" >> $LIST
           fi
           sudo -u $U aria2c -i $LIST -j 4 -x 8 -s 8 --auto-file-renaming=false --continue=true \
             --max-tries=10 --retry-wait=10 --console-log-level=warn --summary-interval=60

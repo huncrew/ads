@@ -50,6 +50,7 @@ Pass CloudFormation overrides to `deploy`:
 |---|---|---|
 | `InstanceType` | `g6e.2xlarge` | `g6e.xlarge`, `g6e.4xlarge`, `g5.2xlarge`, `p5.4xlarge` (H100, needs *P instances* quota) |
 | `ModelSet` | `wan22-all` | `wan22-14b`, `wan22-5b` |
+| `AdultModels` | `false` | `true` adds Wan 2.2 Remix NSFW (T2V + I2V) and its NSFW text encoder (~64GB) |
 | `VolumeSizeGiB` | `250` | |
 | `IdleStopMinutes` | `60` | `0` disables auto-stop |
 | `KeyName` / `SshCidr` | empty | Optional SSH access |
@@ -61,6 +62,17 @@ Set `STACK=name` or `AWS_REGION=...` before `./gpu.sh` to run a second stack or 
 - 5B, 720p, 5 s clip: about 3–5 min
 - 14B with the 4-step LoRA, 480p–720p, 5 s clip: about 2–6 min
 - 14B without the LoRA, 720p: 20+ min
+
+### Adult content (`AdultModels=true`)
+
+Base Wan 2.2 never refuses a prompt, but it saw little explicit material in training, so it renders it poorly. [Wan 2.2 Remix](https://huggingface.co/FX-FeiHou/wan2.2-Remix) is a community fine-tune for this. To use it:
+
+1. Load the stock Wan 2.2 14B template.
+2. In the two *Load Diffusion Model* nodes, pick `Wan2.2_Remix_NSFW_{t2v|i2v}_14b_{high|low}_lighting_*`.
+3. In *Load CLIP*, pick `nsfw_wan_umt5-xxl_fp8_scaled`.
+4. Remove the lightx2v LoRAs. The 4-step speed-up is already built in, so use about 4–8 steps and CFG 1.
+
+For image-to-video, upload a starting image, for example a photo of yourself. Only use photos of people who consented, and only of adults.
 
 Install more models or custom nodes from **Manager** in the ComfyUI menu.
 
